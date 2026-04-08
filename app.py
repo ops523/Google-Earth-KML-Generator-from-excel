@@ -7,72 +7,64 @@ import re
 from xml.etree.ElementTree import Element, SubElement, ElementTree
 from io import BytesIO
 
-st.set_page_config(page_title="KML Geocoder", layout="wide")
+st.set_page_config(page_title="KML Geocoder (OSM)", layout="wide")
 
-st.title("📍 Excel to KML with Radius (Advanced Version)")
-st.write("Robust geocoding with fallback + clean addresses")
-
-# 🔑 API Key
-api_key = st.text_input("Enter Google Maps API Key", type="password")
+st.title("📍 Excel to KML with Radius (OpenStreetMap)")
+st.write("Better accuracy for Indian addresses (no API key required)")
 
 # 📂 Upload
 uploaded_file = st.file_uploader("Upload Excel File", type=["xlsx"])
 
 # -------------------------------
-# 🧹 Clean Address (Improved)
+# 🧹 Clean Address
 # -------------------------------
 def clean_address(row):
     base = str(row['Address'])
 
-    # Remove noisy patterns
-    base = re.sub(r'#\d+', '', base)          # remove #123
-    base = base.replace("_", " ")             # remove underscores
-    base = re.sub(r'[^a-zA-Z0-9, ]', ' ', base)  # remove special chars
-    base = re.sub(r'\s+', ' ', base).strip()  # normalize spaces
+    base = re.sub(r'#\d+', '', base)
+    base = base.replace("_", " ")
+    base = re.sub(r'[^a-zA-Z0-9, ]', ' ', base)
+    base = re.sub(r'\s+', ' ', base).strip()
 
     city = str(row['City']).strip()
     state = str(row['State']).strip()
-    pincode = str(row['Pincode']).strip()
 
-    # Optimized address (not too long, not too short)
     return f"{base}, {city}, {state}, India"
 
 
 # -------------------------------
-# 🧭 Geocode with fallback
+# 🧭 OSM Geocoding
 # -------------------------------
-def geocode_address(row, api_key):
-    url = "https://maps.googleapis.com/maps/api/geocode/json"
+def geocode_address_osm(row):
+    url = "https://nominatim.openstreetmap.org/search"
 
-    # Try 3 levels
-    address_levels = [
-        clean_address(row),
-        f"{row['City']}, {row['State']}, India",
-        f"{row['District']}, {row['State']}, India"
-    ]
+    address_full = clean_address(row)
+    address_city = f"{row['City']}, {row['State']}, India"
 
-    for address in address_levels:
+    headers = {"User-Agent": "kml-geocoder-app"}
+
+    # Try full address
+    for address, label in [(address_full, "FULL"), (address_city, "CITY_FALLBACK")]:
         params = {
-            "address": address,
-            "key": api_key,
-            "region": "in"
+            "q": address,
+            "format": "json",
+            "limit": 1,
+            "countrycodes": "in"
         }
 
         try:
-            response = requests.get(url, params=params)
+            response = requests.get(url, params=params, headers=headers)
             data = response.json()
 
-            if data["status"] == "OK":
-                loc = data["results"][0]["geometry"]["location"]
-                return loc["lng"], loc["lat"], "OK", address
-
-            elif data["status"] in ["OVER_QUERY_LIMIT", "UNKNOWN_ERROR"]:
-                time.sleep(1)
+            if len(data) > 0:
+                lat = float(data[0]["lat"])
+                lng = float(data[0]["lon"])
+                return lng, lat, label, address
 
         except:
             continue
 
-    return None, None, "FAILED", address_levels[0]
+    return None, None, "FAILED", address_full
 
 
 # -------------------------------
@@ -97,7 +89,7 @@ def create_circle(lat, lng, radius_km, points=36):
 
 
 # -------------------------------
-# 🎨 Style Creator
+# 🎨 Styles
 # -------------------------------
 def add_style(doc, style_id, color):
     style = SubElement(doc, 'Style', id=style_id)
@@ -113,13 +105,13 @@ def add_style(doc, style_id, color):
 # -------------------------------
 # 🗺️ Generate KML
 # -------------------------------
-def generate_kml(df, api_key):
+def generate_kml(df):
     kml = Element('kml', xmlns="http://www.opengis.net/kml/2.2")
     document = SubElement(kml, 'Document')
 
-    add_style(document, "circle1", "7dff0000")
-    add_style(document, "circle2", "7d00ff00")
-    add_style(document, "circle3", "7d0000ff")
+    add_style(document, "circle1", "7dff0000")  # Red
+    add_style(document, "circle2", "7d00ff00")  # Green
+    add_style(document, "circle3", "7d0000ff")  # Blue
 
     progress = st.progress(0)
     status_text = st.empty()
@@ -130,7 +122,7 @@ def generate_kml(df, api_key):
     for i, row in df.iterrows():
         status_text.text(f"Processing {i+1}/{len(df)}")
 
-        lng, lat, status, used_address = geocode_address(row, api_key)
+        lng, lat, status, used_address = geocode_address_osm(row)
 
         debug_data.append({
             "Used Address": used_address,
@@ -142,7 +134,7 @@ def generate_kml(df, api_key):
         if lat is not None and lng is not None:
             city = str(row['City'])
 
-            # 📍 Point
+            # 📍 Main Point
             pm = SubElement(document, 'Placemark')
             SubElement(pm, 'name').text = city
             SubElement(pm, 'description').text = used_address
@@ -167,9 +159,9 @@ def generate_kml(df, api_key):
             results.append("❌")
 
         progress.progress((i + 1) / len(df))
-        time.sleep(0.05)
+        time.sleep(1)  # ⚠️ REQUIRED for OSM rate limit
 
-    # Save
+    # Save KML
     tree = ElementTree(kml)
     buffer = BytesIO()
     tree.write(buffer, encoding='utf-8', xml_declaration=True)
@@ -184,10 +176,8 @@ def generate_kml(df, api_key):
 # 🚀 RUN
 # -------------------------------
 if st.button("Generate KML"):
-    if not api_key:
-        st.error("Enter API key")
-    elif not uploaded_file:
-        st.error("Upload file")
+    if not uploaded_file:
+        st.error("Please upload Excel file")
     else:
         df = pd.read_excel(uploaded_file)
 
@@ -195,9 +185,9 @@ if st.button("Generate KML"):
         if not all(col in df.columns for col in required_cols):
             st.error("Missing required columns!")
         else:
-            st.info("Processing started...")
+            st.info("Processing (OSM is slower but more accurate)...")
 
-            kml_data, result_df, debug_df = generate_kml(df, api_key)
+            kml_data, result_df, debug_df = generate_kml(df)
 
             st.success("KML generated successfully!")
 
@@ -210,5 +200,5 @@ if st.button("Generate KML"):
             st.subheader("✅ Summary")
             st.dataframe(result_df)
 
-            st.subheader("🔍 Debug Data (Must Check)")
+            st.subheader("🔍 Debug Data")
             st.dataframe(debug_df)
