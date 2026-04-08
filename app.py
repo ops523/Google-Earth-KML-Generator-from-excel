@@ -7,10 +7,10 @@ import re
 from xml.etree.ElementTree import Element, SubElement, ElementTree
 from io import BytesIO
 
-st.set_page_config(page_title="KML Geocoder (OSM)", layout="wide")
+st.set_page_config(page_title="KML Geocoder (OSM Stable)", layout="wide")
 
-st.title("📍 Excel to KML with Radius (OpenStreetMap)")
-st.write("Better accuracy for Indian addresses (no API key required)")
+st.title("📍 Excel to KML with Radius (Stable OSM Version)")
+st.write("Reliable geocoding for Indian addresses using OpenStreetMap")
 
 # 📂 Upload
 uploaded_file = st.file_uploader("Upload Excel File", type=["xlsx"])
@@ -33,7 +33,7 @@ def clean_address(row):
 
 
 # -------------------------------
-# 🧭 OSM Geocoding
+# 🧭 OSM Geocoding (FIXED)
 # -------------------------------
 def geocode_address_osm(row):
     url = "https://nominatim.openstreetmap.org/search"
@@ -41,9 +41,10 @@ def geocode_address_osm(row):
     address_full = clean_address(row)
     address_city = f"{row['City']}, {row['State']}, India"
 
-    headers = {"User-Agent": "kml-geocoder-app"}
+    headers = {
+        "User-Agent": "Adwallz-KML-Tool/1.0 (ops@adwallz.com)"
+    }
 
-    # Try full address
     for address, label in [(address_full, "FULL"), (address_city, "CITY_FALLBACK")]:
         params = {
             "q": address,
@@ -52,17 +53,30 @@ def geocode_address_osm(row):
             "countrycodes": "in"
         }
 
-        try:
-            response = requests.get(url, params=params, headers=headers)
-            data = response.json()
+        for attempt in range(2):
+            try:
+                response = requests.get(
+                    url,
+                    params=params,
+                    headers=headers,
+                    timeout=10
+                )
 
-            if len(data) > 0:
-                lat = float(data[0]["lat"])
-                lng = float(data[0]["lon"])
-                return lng, lat, label, address
+                # Debug HTTP issues
+                if response.status_code != 200:
+                    return None, None, f"HTTP_{response.status_code}", address
 
-        except:
-            continue
+                data = response.json()
+
+                if isinstance(data, list) and len(data) > 0:
+                    lat = float(data[0]["lat"])
+                    lng = float(data[0]["lon"])
+                    return lng, lat, label, address
+
+                time.sleep(1)
+
+            except Exception as e:
+                return None, None, "ERROR", address
 
     return None, None, "FAILED", address_full
 
@@ -109,9 +123,9 @@ def generate_kml(df):
     kml = Element('kml', xmlns="http://www.opengis.net/kml/2.2")
     document = SubElement(kml, 'Document')
 
-    add_style(document, "circle1", "7dff0000")  # Red
-    add_style(document, "circle2", "7d00ff00")  # Green
-    add_style(document, "circle3", "7d0000ff")  # Blue
+    add_style(document, "circle1", "7dff0000")
+    add_style(document, "circle2", "7d00ff00")
+    add_style(document, "circle3", "7d0000ff")
 
     progress = st.progress(0)
     status_text = st.empty()
@@ -159,7 +173,7 @@ def generate_kml(df):
             results.append("❌")
 
         progress.progress((i + 1) / len(df))
-        time.sleep(1)  # ⚠️ REQUIRED for OSM rate limit
+        time.sleep(1.2)  # 🚨 VERY IMPORTANT
 
     # Save KML
     tree = ElementTree(kml)
@@ -185,7 +199,7 @@ if st.button("Generate KML"):
         if not all(col in df.columns for col in required_cols):
             st.error("Missing required columns!")
         else:
-            st.info("Processing (OSM is slower but more accurate)...")
+            st.info("Processing (OSM safe mode — may take few minutes)...")
 
             kml_data, result_df, debug_df = generate_kml(df)
 
@@ -200,5 +214,5 @@ if st.button("Generate KML"):
             st.subheader("✅ Summary")
             st.dataframe(result_df)
 
-            st.subheader("🔍 Debug Data")
+            st.subheader("🔍 Debug Data (Check Status)")
             st.dataframe(debug_df)
