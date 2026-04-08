@@ -1,6 +1,45 @@
+import streamlit as st
+import pandas as pd
+import requests
+import time
 import math
+from xml.etree.ElementTree import Element, SubElement, ElementTree
+from io import BytesIO
 
-# 🧭 Create Circle (as polygon)
+st.set_page_config(page_title="KML Geocoder", layout="wide")
+
+st.title("📍 Excel to KML with Radius (Google Maps)")
+st.write("Upload your Excel file → Generate KML with 1km, 2km, 3km coverage")
+
+# 🔑 API Key input
+api_key = st.text_input("Enter Google Maps API Key", type="password")
+
+# 📂 Upload file
+uploaded_file = st.file_uploader("Upload Excel File", type=["xlsx"])
+
+# -------------------------------
+# 🧭 Geocode function
+# -------------------------------
+def geocode_address(address, api_key):
+    url = "https://maps.googleapis.com/maps/api/geocode/json"
+    params = {"address": address, "key": api_key}
+
+    try:
+        response = requests.get(url, params=params)
+        data = response.json()
+
+        if data["status"] == "OK":
+            location = data["results"][0]["geometry"]["location"]
+            return location["lng"], location["lat"]
+        else:
+            return None, None
+    except:
+        return None, None
+
+
+# -------------------------------
+# 🔵 Create circle polygon
+# -------------------------------
 def create_circle(lat, lng, radius_km, num_points=36):
     points = []
     for i in range(num_points):
@@ -9,33 +48,40 @@ def create_circle(lat, lng, radius_km, num_points=36):
         dx = radius_km * math.cos(angle)
         dy = radius_km * math.sin(angle)
 
-        new_lat = lat + (dy / 111)  # approx conversion
+        new_lat = lat + (dy / 111)
         new_lng = lng + (dx / (111 * math.cos(math.radians(lat))))
 
         points.append(f"{new_lng},{new_lat}")
 
-    points.append(points[0])  # close polygon
+    points.append(points[0])  # close loop
     return " ".join(points)
 
 
-# 🗺️ Generate KML with circles
+# -------------------------------
+# 🎨 Add style
+# -------------------------------
+def add_style(doc, style_id, color):
+    style = SubElement(doc, 'Style', id=style_id)
+
+    line = SubElement(style, 'LineStyle')
+    SubElement(line, 'color').text = color
+    SubElement(line, 'width').text = "2"
+
+    poly = SubElement(style, 'PolyStyle')
+    SubElement(poly, 'color').text = color
+
+
+# -------------------------------
+# 🗺️ Generate KML
+# -------------------------------
 def generate_kml(df, api_key):
     kml = Element('kml', xmlns="http://www.opengis.net/kml/2.2")
     document = SubElement(kml, 'Document')
 
-    # 🎨 Styles for circles
-    def add_style(doc, style_id, color):
-        style = SubElement(doc, 'Style', id=style_id)
-        line = SubElement(style, 'LineStyle')
-        SubElement(line, 'color').text = color
-        SubElement(line, 'width').text = "2"
-
-        poly = SubElement(style, 'PolyStyle')
-        SubElement(poly, 'color').text = color
-
-    add_style(document, "circle1", "7dff0000")  # red (1km)
-    add_style(document, "circle2", "7d00ff00")  # green (2km)
-    add_style(document, "circle3", "7d0000ff")  # blue (3km)
+    # Circle styles
+    add_style(document, "circle1", "7dff0000")  # Red
+    add_style(document, "circle2", "7d00ff00")  # Green
+    add_style(document, "circle3", "7d0000ff")  # Blue
 
     progress = st.progress(0)
     status_text = st.empty()
@@ -51,7 +97,7 @@ def generate_kml(df, api_key):
         lng, lat = geocode_address(address, api_key)
 
         if lat and lng:
-            # 📍 Main Point
+            # 📍 Main location
             placemark = SubElement(document, 'Placemark')
 
             name = SubElement(placemark, 'name')
@@ -64,7 +110,7 @@ def generate_kml(df, api_key):
             coords = SubElement(point, 'coordinates')
             coords.text = f"{lng},{lat}"
 
-            # 🔵 Add Circles (1km, 2km, 3km)
+            # 🔵 Add radius circles
             for radius, style_id in [(1, "circle1"), (2, "circle2"), (3, "circle3")]:
                 circle_coords = create_circle(lat, lng, radius)
 
@@ -84,7 +130,7 @@ def generate_kml(df, api_key):
         progress.progress((i + 1) / len(df))
         time.sleep(0.05)
 
-    # 💾 Save
+    # Convert to bytes
     tree = ElementTree(kml)
     buffer = BytesIO()
     tree.write(buffer, encoding='utf-8', xml_declaration=True)
@@ -92,3 +138,33 @@ def generate_kml(df, api_key):
     df["Status"] = results
 
     return buffer.getvalue(), df
+
+
+# -------------------------------
+# 🚀 Run button
+# -------------------------------
+if st.button("Generate KML"):
+    if not api_key:
+        st.error("Please enter API Key")
+    elif not uploaded_file:
+        st.error("Please upload Excel file")
+    else:
+        df = pd.read_excel(uploaded_file)
+
+        st.info("Processing started...")
+
+        kml_data, result_df = generate_kml(df, api_key)
+
+        st.success("KML generated successfully!")
+
+        # Download KML
+        st.download_button(
+            label="Download KML File",
+            data=kml_data,
+            file_name="locations_with_radius.kml",
+            mime="application/vnd.google-earth.kml+xml"
+        )
+
+        # Show table
+        st.subheader("Processing Summary")
+        st.dataframe(result_df)
