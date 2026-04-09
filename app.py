@@ -9,10 +9,10 @@ import os
 from xml.etree.ElementTree import Element, SubElement, ElementTree
 from io import BytesIO
 
-st.set_page_config(page_title="KML Geocoder (LocationIQ)", layout="wide")
+st.set_page_config(page_title="KML Geocoder (Accurate)", layout="wide")
 
-st.title("📍 Excel to KML with Radius (Stable Version)")
-st.write("Powered by LocationIQ (No blocking, high success rate)")
+st.title("📍 Excel to KML with Radius (Accurate Version)")
+st.write("Improved geocoding with smart address handling")
 
 # 🔑 API KEY INPUT
 api_key = st.text_input("Enter LocationIQ API Key", type="password")
@@ -21,20 +21,28 @@ api_key = st.text_input("Enter LocationIQ API Key", type="password")
 uploaded_file = st.file_uploader("Upload Excel File", type=["xlsx"])
 
 # -------------------------------
-# 🧹 Clean Address
+# 🧹 SMART ADDRESS CLEANING
 # -------------------------------
 def clean_address(row):
-    base = str(row['Address'])
-    base = re.sub(r'#\d+', '', base)
-    base = base.replace("_", " ")
-    base = re.sub(r'[^a-zA-Z0-9, ]', ' ', base)
-    base = re.sub(r'\s+', ' ', base).strip()
+    address = str(row['Address'])
 
-    return f"{base}, {row['City']}, {row['State']}, India"
+    address = re.sub(r'KHATA\s*#?\s*\d+', '', address, flags=re.IGNORECASE)
+    address = re.sub(r'KHESRA\s*#?\s*\d+', '', address, flags=re.IGNORECASE)
+    address = re.sub(r'THANA\s*#?\s*\d+', '', address, flags=re.IGNORECASE)
+    address = re.sub(r'WARD\s*#?\s*\d+', '', address, flags=re.IGNORECASE)
+
+    address = re.sub(r'#\d+', '', address)
+    address = re.sub(r'\s+', ' ', address).strip()
+
+    city = str(row['City']).strip()
+    district = str(row['District']).strip()
+    state = str(row['State']).strip()
+
+    return f"{address}, {district}, {state}, India"
 
 
 # -------------------------------
-# 💾 Cache
+# 💾 CACHE
 # -------------------------------
 def load_cache():
     if os.path.exists("geocode_cache.json"):
@@ -48,50 +56,56 @@ def save_cache(cache):
 
 
 # -------------------------------
-# 🧭 LocationIQ Geocoding
+# 🧭 MULTI-LEVEL GEOCODING
 # -------------------------------
 def geocode_address_locationiq(row, api_key, cache):
-    address = clean_address(row)
 
-    # Cache check
-    if address in cache:
-        data = cache[address]
-        return data["lng"], data["lat"], "CACHE", address
+    address_levels = [
+        clean_address(row),
+        f"{row['City']}, {row['District']}, {row['State']}, India",
+        f"{row['District']}, {row['State']}, India"
+    ]
 
-    url = "https://us1.locationiq.com/v1/search.php"
+    for level, address in enumerate(address_levels):
 
-    params = {
-        "key": api_key,
-        "q": address,
-        "format": "json",
-        "limit": 1,
-        "countrycodes": "in"
-    }
+        if address in cache:
+            data = cache[address]
+            return data["lng"], data["lat"], f"CACHE_L{level+1}", address
 
-    try:
-        response = requests.get(url, params=params, timeout=10)
+        url = "https://us1.locationiq.com/v1/search.php"
 
-        if response.status_code != 200:
-            return None, None, f"HTTP_{response.status_code}", address
+        params = {
+            "key": api_key,
+            "q": address,
+            "format": "json",
+            "limit": 1,
+            "countrycodes": "in"
+        }
 
-        data = response.json()
+        try:
+            response = requests.get(url, params=params, timeout=10)
 
-        if isinstance(data, list) and len(data) > 0:
-            lat = float(data[0]["lat"])
-            lng = float(data[0]["lon"])
+            if response.status_code != 200:
+                continue
 
-            cache[address] = {"lat": lat, "lng": lng}
+            data = response.json()
 
-            return lng, lat, "OK", address
+            if isinstance(data, list) and len(data) > 0:
+                lat = float(data[0]["lat"])
+                lng = float(data[0]["lon"])
 
-    except:
-        return None, None, "ERROR", address
+                cache[address] = {"lat": lat, "lng": lng}
 
-    return None, None, "FAILED", address
+                return lng, lat, f"LEVEL_{level+1}", address
+
+        except:
+            continue
+
+    return None, None, "FAILED", address_levels[0]
 
 
 # -------------------------------
-# 🔵 Circle Generator
+# 🔵 CIRCLE GENERATOR
 # -------------------------------
 def create_circle(lat, lng, radius_km, points=36):
     coords = []
@@ -112,7 +126,7 @@ def create_circle(lat, lng, radius_km, points=36):
 
 
 # -------------------------------
-# 🎨 Styles
+# 🎨 STYLES
 # -------------------------------
 def add_style(doc, style_id, color):
     style = SubElement(doc, 'Style', id=style_id)
@@ -126,7 +140,7 @@ def add_style(doc, style_id, color):
 
 
 # -------------------------------
-# 🗺️ Generate KML
+# 🗺️ KML GENERATION
 # -------------------------------
 def generate_kml(df, api_key):
     cache = load_cache()
@@ -162,6 +176,7 @@ def generate_kml(df, api_key):
         if lat is not None and lng is not None:
             city = str(row['City'])
 
+            # 📍 Point
             pm = SubElement(document, 'Placemark')
             SubElement(pm, 'name').text = city
             SubElement(pm, 'description').text = used_address
@@ -169,6 +184,7 @@ def generate_kml(df, api_key):
             point = SubElement(pm, 'Point')
             SubElement(point, 'coordinates').text = f"{lng},{lat}"
 
+            # 🔵 Circles
             for r, sid in [(1, "circle1"), (2, "circle2"), (3, "circle3")]:
                 poly_pm = SubElement(document, 'Placemark')
                 SubElement(poly_pm, 'name').text = f"{city} - {r} km"
@@ -185,8 +201,7 @@ def generate_kml(df, api_key):
             results.append("❌")
 
         progress.progress((i + 1) / len(df_batch))
-
-        time.sleep(0.2)  # fast + safe for LocationIQ
+        time.sleep(0.2)
 
     save_cache(cache)
 
@@ -215,7 +230,7 @@ if st.button("Generate KML"):
         if not all(col in df.columns for col in required_cols):
             st.error("Missing required columns!")
         else:
-            st.info("Processing (fast & stable)...")
+            st.info("Processing with improved accuracy...")
 
             kml_data, result_df, debug_df = generate_kml(df, api_key)
 
@@ -230,5 +245,5 @@ if st.button("Generate KML"):
             st.subheader("✅ Summary")
             st.dataframe(result_df)
 
-            st.subheader("🔍 Debug Data")
+            st.subheader("🔍 Debug Data (Check LEVEL_1 / LEVEL_2 / LEVEL_3)")
             st.dataframe(debug_df)
