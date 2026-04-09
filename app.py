@@ -4,15 +4,16 @@ import requests
 import time
 import math
 import re
+import json
+import os
 from xml.etree.ElementTree import Element, SubElement, ElementTree
 from io import BytesIO
 
-st.set_page_config(page_title="KML Geocoder (OSM Stable)", layout="wide")
+st.set_page_config(page_title="KML Geocoder (Stable)", layout="wide")
 
-st.title("📍 Excel to KML with Radius (Stable OSM Version)")
-st.write("Reliable geocoding for Indian addresses using OpenStreetMap")
+st.title("📍 Excel to KML with Radius (Batch + Cache Mode)")
+st.write("Stable geocoding using OpenStreetMap with caching & rate-limit protection")
 
-# 📂 Upload
 uploaded_file = st.file_uploader("Upload Excel File", type=["xlsx"])
 
 # -------------------------------
@@ -20,65 +21,76 @@ uploaded_file = st.file_uploader("Upload Excel File", type=["xlsx"])
 # -------------------------------
 def clean_address(row):
     base = str(row['Address'])
-
     base = re.sub(r'#\d+', '', base)
     base = base.replace("_", " ")
     base = re.sub(r'[^a-zA-Z0-9, ]', ' ', base)
     base = re.sub(r'\s+', ' ', base).strip()
 
-    city = str(row['City']).strip()
-    state = str(row['State']).strip()
-
-    return f"{base}, {city}, {state}, India"
+    return f"{base}, {row['City']}, {row['State']}, India"
 
 
 # -------------------------------
-# 🧭 OSM Geocoding (FIXED)
+# 💾 Cache Functions
 # -------------------------------
-def geocode_address_osm(row):
+def load_cache():
+    if os.path.exists("geocode_cache.json"):
+        with open("geocode_cache.json", "r") as f:
+            return json.load(f)
+    return {}
+
+def save_cache(cache):
+    with open("geocode_cache.json", "w") as f:
+        json.dump(cache, f)
+
+
+# -------------------------------
+# 🧭 Geocode with Cache
+# -------------------------------
+def geocode_address_osm(row, cache):
+    address = clean_address(row)
+
+    # Use cache first
+    if address in cache:
+        data = cache[address]
+        return data["lng"], data["lat"], "CACHE", address
+
     url = "https://nominatim.openstreetmap.org/search"
-
-    address_full = clean_address(row)
-    address_city = f"{row['City']}, {row['State']}, India"
 
     headers = {
         "User-Agent": "Adwallz-KML-Tool/1.0 (ops@adwallz.com)"
     }
 
-    for address, label in [(address_full, "FULL"), (address_city, "CITY_FALLBACK")]:
-        params = {
-            "q": address,
-            "format": "json",
-            "limit": 1,
-            "countrycodes": "in"
-        }
+    params = {
+        "q": address,
+        "format": "json",
+        "limit": 1,
+        "countrycodes": "in"
+    }
 
-        for attempt in range(2):
-            try:
-                response = requests.get(
-                    url,
-                    params=params,
-                    headers=headers,
-                    timeout=10
-                )
+    try:
+        response = requests.get(url, params=params, headers=headers, timeout=10)
 
-                # Debug HTTP issues
-                if response.status_code != 200:
-                    return None, None, f"HTTP_{response.status_code}", address
+        if response.status_code == 429:
+            return None, None, "RATE_LIMIT", address
 
-                data = response.json()
+        if response.status_code != 200:
+            return None, None, f"HTTP_{response.status_code}", address
 
-                if isinstance(data, list) and len(data) > 0:
-                    lat = float(data[0]["lat"])
-                    lng = float(data[0]["lon"])
-                    return lng, lat, label, address
+        data = response.json()
 
-                time.sleep(1)
+        if isinstance(data, list) and len(data) > 0:
+            lat = float(data[0]["lat"])
+            lng = float(data[0]["lon"])
 
-            except Exception as e:
-                return None, None, "ERROR", address
+            # Save to cache
+            cache[address] = {"lat": lat, "lng": lng}
 
-    return None, None, "FAILED", address_full
+            return lng, lat, "OK", address
+
+    except:
+        return None, None, "ERROR", address
+
+    return None, None, "FAILED", address
 
 
 # -------------------------------
@@ -103,7 +115,7 @@ def create_circle(lat, lng, radius_km, points=36):
 
 
 # -------------------------------
-# 🎨 Styles
+# 🎨 Style Creator
 # -------------------------------
 def add_style(doc, style_id, color):
     style = SubElement(doc, 'Style', id=style_id)
@@ -120,6 +132,8 @@ def add_style(doc, style_id, color):
 # 🗺️ Generate KML
 # -------------------------------
 def generate_kml(df):
+    cache = load_cache()
+
     kml = Element('kml', xmlns="http://www.opengis.net/kml/2.2")
     document = SubElement(kml, 'Document')
 
@@ -133,10 +147,14 @@ def generate_kml(df):
     results = []
     debug_data = []
 
-    for i, row in df.iterrows():
-        status_text.text(f"Processing {i+1}/{len(df)}")
+    # Batch processing (first run safe)
+    BATCH_SIZE = 50
+    df_batch = df.head(BATCH_SIZE)
 
-        lng, lat, status, used_address = geocode_address_osm(row)
+    for i, row in df_batch.iterrows():
+        status_text.text(f"Processing {i+1}/{len(df_batch)}")
+
+        lng, lat, status, used_address = geocode_address_osm(row, cache)
 
         debug_data.append({
             "Used Address": used_address,
@@ -148,7 +166,7 @@ def generate_kml(df):
         if lat is not None and lng is not None:
             city = str(row['City'])
 
-            # 📍 Main Point
+            # Main point
             pm = SubElement(document, 'Placemark')
             SubElement(pm, 'name').text = city
             SubElement(pm, 'description').text = used_address
@@ -156,7 +174,7 @@ def generate_kml(df):
             point = SubElement(pm, 'Point')
             SubElement(point, 'coordinates').text = f"{lng},{lat}"
 
-            # 🔵 Circles
+            # Radius circles
             for r, sid in [(1, "circle1"), (2, "circle2"), (3, "circle3")]:
                 poly_pm = SubElement(document, 'Placemark')
                 SubElement(poly_pm, 'name').text = f"{city} - {r} km"
@@ -172,18 +190,23 @@ def generate_kml(df):
         else:
             results.append("❌")
 
-        progress.progress((i + 1) / len(df))
-        time.sleep(1.2)  # 🚨 VERY IMPORTANT
+        progress.progress((i + 1) / len(df_batch))
+
+        # Rate limit safe delay
+        time.sleep(1.5)
+
+    # Save cache
+    save_cache(cache)
 
     # Save KML
     tree = ElementTree(kml)
     buffer = BytesIO()
     tree.write(buffer, encoding='utf-8', xml_declaration=True)
 
-    df["Status"] = results
+    df_batch["Status"] = results
     debug_df = pd.DataFrame(debug_data)
 
-    return buffer.getvalue(), df, debug_df
+    return buffer.getvalue(), df_batch, debug_df
 
 
 # -------------------------------
@@ -199,7 +222,7 @@ if st.button("Generate KML"):
         if not all(col in df.columns for col in required_cols):
             st.error("Missing required columns!")
         else:
-            st.info("Processing (OSM safe mode — may take few minutes)...")
+            st.info("Processing (Batch Mode: 50 rows per run)...")
 
             kml_data, result_df, debug_df = generate_kml(df)
 
@@ -208,11 +231,11 @@ if st.button("Generate KML"):
             st.download_button(
                 "Download KML",
                 kml_data,
-                "locations_with_radius.kml"
+                "locations_batch.kml"
             )
 
             st.subheader("✅ Summary")
             st.dataframe(result_df)
 
-            st.subheader("🔍 Debug Data (Check Status)")
+            st.subheader("🔍 Debug Data")
             st.dataframe(debug_df)
