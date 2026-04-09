@@ -9,11 +9,15 @@ import os
 from xml.etree.ElementTree import Element, SubElement, ElementTree
 from io import BytesIO
 
-st.set_page_config(page_title="KML Geocoder (Stable)", layout="wide")
+st.set_page_config(page_title="KML Geocoder (LocationIQ)", layout="wide")
 
-st.title("📍 Excel to KML with Radius (Batch + Cache Mode)")
-st.write("Stable geocoding using OpenStreetMap with caching & rate-limit protection")
+st.title("📍 Excel to KML with Radius (Stable Version)")
+st.write("Powered by LocationIQ (No blocking, high success rate)")
 
+# 🔑 API KEY INPUT
+api_key = st.text_input("Enter LocationIQ API Key", type="password")
+
+# 📂 Upload file
 uploaded_file = st.file_uploader("Upload Excel File", type=["xlsx"])
 
 # -------------------------------
@@ -30,7 +34,7 @@ def clean_address(row):
 
 
 # -------------------------------
-# 💾 Cache Functions
+# 💾 Cache
 # -------------------------------
 def load_cache():
     if os.path.exists("geocode_cache.json"):
@@ -44,23 +48,20 @@ def save_cache(cache):
 
 
 # -------------------------------
-# 🧭 Geocode with Cache
+# 🧭 LocationIQ Geocoding
 # -------------------------------
-def geocode_address_osm(row, cache):
+def geocode_address_locationiq(row, api_key, cache):
     address = clean_address(row)
 
-    # Use cache first
+    # Cache check
     if address in cache:
         data = cache[address]
         return data["lng"], data["lat"], "CACHE", address
 
-    url = "https://nominatim.openstreetmap.org/search"
-
-    headers = {
-        "User-Agent": "Adwallz-KML-Tool/1.0 (ops@adwallz.com)"
-    }
+    url = "https://us1.locationiq.com/v1/search.php"
 
     params = {
+        "key": api_key,
         "q": address,
         "format": "json",
         "limit": 1,
@@ -68,10 +69,7 @@ def geocode_address_osm(row, cache):
     }
 
     try:
-        response = requests.get(url, params=params, headers=headers, timeout=10)
-
-        if response.status_code == 429:
-            return None, None, "RATE_LIMIT", address
+        response = requests.get(url, params=params, timeout=10)
 
         if response.status_code != 200:
             return None, None, f"HTTP_{response.status_code}", address
@@ -82,7 +80,6 @@ def geocode_address_osm(row, cache):
             lat = float(data[0]["lat"])
             lng = float(data[0]["lon"])
 
-            # Save to cache
             cache[address] = {"lat": lat, "lng": lng}
 
             return lng, lat, "OK", address
@@ -115,7 +112,7 @@ def create_circle(lat, lng, radius_km, points=36):
 
 
 # -------------------------------
-# 🎨 Style Creator
+# 🎨 Styles
 # -------------------------------
 def add_style(doc, style_id, color):
     style = SubElement(doc, 'Style', id=style_id)
@@ -131,7 +128,7 @@ def add_style(doc, style_id, color):
 # -------------------------------
 # 🗺️ Generate KML
 # -------------------------------
-def generate_kml(df):
+def generate_kml(df, api_key):
     cache = load_cache()
 
     kml = Element('kml', xmlns="http://www.opengis.net/kml/2.2")
@@ -147,14 +144,13 @@ def generate_kml(df):
     results = []
     debug_data = []
 
-    # Batch processing (first run safe)
     BATCH_SIZE = 50
     df_batch = df.head(BATCH_SIZE)
 
     for i, row in df_batch.iterrows():
         status_text.text(f"Processing {i+1}/{len(df_batch)}")
 
-        lng, lat, status, used_address = geocode_address_osm(row, cache)
+        lng, lat, status, used_address = geocode_address_locationiq(row, api_key, cache)
 
         debug_data.append({
             "Used Address": used_address,
@@ -166,7 +162,6 @@ def generate_kml(df):
         if lat is not None and lng is not None:
             city = str(row['City'])
 
-            # Main point
             pm = SubElement(document, 'Placemark')
             SubElement(pm, 'name').text = city
             SubElement(pm, 'description').text = used_address
@@ -174,7 +169,6 @@ def generate_kml(df):
             point = SubElement(pm, 'Point')
             SubElement(point, 'coordinates').text = f"{lng},{lat}"
 
-            # Radius circles
             for r, sid in [(1, "circle1"), (2, "circle2"), (3, "circle3")]:
                 poly_pm = SubElement(document, 'Placemark')
                 SubElement(poly_pm, 'name').text = f"{city} - {r} km"
@@ -192,13 +186,10 @@ def generate_kml(df):
 
         progress.progress((i + 1) / len(df_batch))
 
-        # Rate limit safe delay
-        time.sleep(1.5)
+        time.sleep(0.2)  # fast + safe for LocationIQ
 
-    # Save cache
     save_cache(cache)
 
-    # Save KML
     tree = ElementTree(kml)
     buffer = BytesIO()
     tree.write(buffer, encoding='utf-8', xml_declaration=True)
@@ -213,8 +204,10 @@ def generate_kml(df):
 # 🚀 RUN
 # -------------------------------
 if st.button("Generate KML"):
-    if not uploaded_file:
-        st.error("Please upload Excel file")
+    if not api_key:
+        st.error("Enter LocationIQ API Key")
+    elif not uploaded_file:
+        st.error("Upload Excel file")
     else:
         df = pd.read_excel(uploaded_file)
 
@@ -222,16 +215,16 @@ if st.button("Generate KML"):
         if not all(col in df.columns for col in required_cols):
             st.error("Missing required columns!")
         else:
-            st.info("Processing (Batch Mode: 50 rows per run)...")
+            st.info("Processing (fast & stable)...")
 
-            kml_data, result_df, debug_df = generate_kml(df)
+            kml_data, result_df, debug_df = generate_kml(df, api_key)
 
             st.success("KML generated successfully!")
 
             st.download_button(
                 "Download KML",
                 kml_data,
-                "locations_batch.kml"
+                "locations.kml"
             )
 
             st.subheader("✅ Summary")
