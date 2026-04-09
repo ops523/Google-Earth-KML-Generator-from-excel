@@ -9,19 +9,17 @@ import os
 from xml.etree.ElementTree import Element, SubElement, ElementTree
 from io import BytesIO
 
-st.set_page_config(page_title="KML Geocoder (Accurate)", layout="wide")
+st.set_page_config(page_title="KML Geocoder (Batch Control)", layout="wide")
 
-st.title("📍 Excel to KML with Radius (Accurate Version)")
-st.write("Improved geocoding with smart address handling")
+st.title("📍 Excel to KML with Radius (Batch Controlled)")
 
-# 🔑 API KEY INPUT
+# 🔑 API KEY
 api_key = st.text_input("Enter LocationIQ API Key", type="password")
 
-# 📂 Upload file
 uploaded_file = st.file_uploader("Upload Excel File", type=["xlsx"])
 
 # -------------------------------
-# 🧹 SMART ADDRESS CLEANING
+# 🧹 CLEAN ADDRESS
 # -------------------------------
 def clean_address(row):
     address = str(row['Address'])
@@ -34,11 +32,7 @@ def clean_address(row):
     address = re.sub(r'#\d+', '', address)
     address = re.sub(r'\s+', ' ', address).strip()
 
-    city = str(row['City']).strip()
-    district = str(row['District']).strip()
-    state = str(row['State']).strip()
-
-    return f"{address}, {district}, {state}, India"
+    return f"{address}, {row['District']}, {row['State']}, India"
 
 
 # -------------------------------
@@ -56,10 +50,9 @@ def save_cache(cache):
 
 
 # -------------------------------
-# 🧭 MULTI-LEVEL GEOCODING
+# 🧭 GEOCODE
 # -------------------------------
-def geocode_address_locationiq(row, api_key, cache):
-
+def geocode(row, api_key, cache):
     address_levels = [
         clean_address(row),
         f"{row['City']}, {row['District']}, {row['State']}, India",
@@ -69,8 +62,8 @@ def geocode_address_locationiq(row, api_key, cache):
     for level, address in enumerate(address_levels):
 
         if address in cache:
-            data = cache[address]
-            return data["lng"], data["lat"], f"CACHE_L{level+1}", address
+            d = cache[address]
+            return d["lng"], d["lat"], f"CACHE_L{level+1}", address
 
         url = "https://us1.locationiq.com/v1/search.php"
 
@@ -83,21 +76,19 @@ def geocode_address_locationiq(row, api_key, cache):
         }
 
         try:
-            response = requests.get(url, params=params, timeout=10)
+            r = requests.get(url, params=params, timeout=10)
 
-            if response.status_code != 200:
+            if r.status_code != 200:
                 continue
 
-            data = response.json()
+            data = r.json()
 
-            if isinstance(data, list) and len(data) > 0:
+            if len(data) > 0:
                 lat = float(data[0]["lat"])
                 lng = float(data[0]["lon"])
 
                 cache[address] = {"lat": lat, "lng": lng}
-
                 return lng, lat, f"LEVEL_{level+1}", address
-
         except:
             continue
 
@@ -105,145 +96,102 @@ def geocode_address_locationiq(row, api_key, cache):
 
 
 # -------------------------------
-# 🔵 CIRCLE GENERATOR
+# 🔵 CIRCLE
 # -------------------------------
-def create_circle(lat, lng, radius_km, points=36):
+def create_circle(lat, lng, r):
     coords = []
-
-    for i in range(points):
-        angle = math.radians(i * 360 / points)
-
-        dx = radius_km * math.cos(angle)
-        dy = radius_km * math.sin(angle)
+    for i in range(36):
+        angle = math.radians(i * 10)
+        dx = r * math.cos(angle)
+        dy = r * math.sin(angle)
 
         new_lat = lat + (dy / 111)
         new_lng = lng + (dx / (111 * math.cos(math.radians(lat))))
 
         coords.append(f"{new_lng},{new_lat}")
-
     coords.append(coords[0])
     return " ".join(coords)
 
 
 # -------------------------------
-# 🎨 STYLES
+# 🗺️ GENERATE
 # -------------------------------
-def add_style(doc, style_id, color):
-    style = SubElement(doc, 'Style', id=style_id)
+def generate(df, api_key, batch_no, batch_size=50):
 
-    line = SubElement(style, 'LineStyle')
-    SubElement(line, 'color').text = color
-    SubElement(line, 'width').text = "2"
-
-    poly = SubElement(style, 'PolyStyle')
-    SubElement(poly, 'color').text = color
-
-
-# -------------------------------
-# 🗺️ KML GENERATION
-# -------------------------------
-def generate_kml(df, api_key):
     cache = load_cache()
 
-    kml = Element('kml', xmlns="http://www.opengis.net/kml/2.2")
-    document = SubElement(kml, 'Document')
+    start = (batch_no - 1) * batch_size
+    end = start + batch_size
 
-    add_style(document, "circle1", "7dff0000")
-    add_style(document, "circle2", "7d00ff00")
-    add_style(document, "circle3", "7d0000ff")
+    df_batch = df.iloc[start:end]
+
+    kml = Element('kml', xmlns="http://www.opengis.net/kml/2.2")
+    doc = SubElement(kml, 'Document')
 
     progress = st.progress(0)
-    status_text = st.empty()
 
     results = []
-    debug_data = []
-
-    BATCH_SIZE = 50
-    df_batch = df.head(BATCH_SIZE)
+    debug = []
 
     for i, row in df_batch.iterrows():
-        status_text.text(f"Processing {i+1}/{len(df_batch)}")
 
-        lng, lat, status, used_address = geocode_address_locationiq(row, api_key, cache)
+        lng, lat, status, addr = geocode(row, api_key, cache)
 
-        debug_data.append({
-            "Used Address": used_address,
-            "Latitude": lat,
-            "Longitude": lng,
+        debug.append({
+            "Address": addr,
+            "Lat": lat,
+            "Lng": lng,
             "Status": status
         })
 
-        if lat is not None and lng is not None:
-            city = str(row['City'])
+        if lat:
+            pm = SubElement(doc, 'Placemark')
+            SubElement(pm, 'name').text = str(row['City'])
 
-            # 📍 Point
-            pm = SubElement(document, 'Placemark')
-            SubElement(pm, 'name').text = city
-            SubElement(pm, 'description').text = used_address
+            pt = SubElement(pm, 'Point')
+            SubElement(pt, 'coordinates').text = f"{lng},{lat}"
 
-            point = SubElement(pm, 'Point')
-            SubElement(point, 'coordinates').text = f"{lng},{lat}"
+            for r in [1, 2, 3]:
+                poly = SubElement(doc, 'Placemark')
+                SubElement(poly, 'name').text = f"{row['City']} {r}km"
 
-            # 🔵 Circles
-            for r, sid in [(1, "circle1"), (2, "circle2"), (3, "circle3")]:
-                poly_pm = SubElement(document, 'Placemark')
-                SubElement(poly_pm, 'name').text = f"{city} - {r} km"
-                SubElement(poly_pm, 'styleUrl').text = f"#{sid}"
-
-                polygon = SubElement(poly_pm, 'Polygon')
+                polygon = SubElement(poly, 'Polygon')
                 outer = SubElement(polygon, 'outerBoundaryIs')
-                linear = SubElement(outer, 'LinearRing')
+                ring = SubElement(outer, 'LinearRing')
 
-                SubElement(linear, 'coordinates').text = create_circle(lat, lng, r)
+                SubElement(ring, 'coordinates').text = create_circle(lat, lng, r)
 
             results.append("✅")
         else:
             results.append("❌")
 
-        progress.progress((i + 1) / len(df_batch))
+        progress.progress((len(results)) / len(df_batch))
         time.sleep(0.2)
 
     save_cache(cache)
 
-    tree = ElementTree(kml)
     buffer = BytesIO()
-    tree.write(buffer, encoding='utf-8', xml_declaration=True)
+    ElementTree(kml).write(buffer, encoding='utf-8', xml_declaration=True)
 
     df_batch["Status"] = results
-    debug_df = pd.DataFrame(debug_data)
 
-    return buffer.getvalue(), df_batch, debug_df
+    return buffer.getvalue(), df_batch, pd.DataFrame(debug)
 
 
 # -------------------------------
 # 🚀 RUN
 # -------------------------------
-if st.button("Generate KML"):
-    if not api_key:
-        st.error("Enter LocationIQ API Key")
-    elif not uploaded_file:
-        st.error("Upload Excel file")
-    else:
-        df = pd.read_excel(uploaded_file)
+if uploaded_file:
 
-        required_cols = ["City", "State", "District", "Pincode", "Address"]
-        if not all(col in df.columns for col in required_cols):
-            st.error("Missing required columns!")
-        else:
-            st.info("Processing with improved accuracy...")
+    df = pd.read_excel(uploaded_file)
 
-            kml_data, result_df, debug_df = generate_kml(df, api_key)
+    batch_no = st.number_input("Batch Number", min_value=1, value=1)
 
-            st.success("KML generated successfully!")
+    if st.button("Generate KML"):
 
-            st.download_button(
-                "Download KML",
-                kml_data,
-                "locations.kml"
-            )
+        kml, result, debug = generate(df, api_key, batch_no)
 
-            st.subheader("✅ Summary")
-            st.dataframe(result_df)
+        st.download_button("Download KML", kml, f"batch_{batch_no}.kml")
 
-            st.subheader("🔍 Debug Data (Check LEVEL_1 / LEVEL_2 / LEVEL_3)")
-            st.dataframe(debug_df)
+        st.dataframe(result)
+        st.dataframe(debug)
