@@ -9,9 +9,9 @@ import os
 from xml.etree.ElementTree import Element, SubElement, ElementTree
 from io import BytesIO
 
-st.set_page_config(page_title="KML Geocoder (Precision Mode)", layout="wide")
+st.set_page_config(page_title="KML Geocoder (Pincode Optimized)", layout="wide")
 
-st.title("📍 Excel to KML (High Accuracy + Clean Visuals)")
+st.title("📍 Excel to KML (Pincode + High Accuracy)")
 
 api_key = st.text_input("Enter LocationIQ API Key", type="password")
 uploaded_file = st.file_uploader("Upload Excel File", type=["xlsx"])
@@ -31,7 +31,7 @@ def clean_address(row):
     address = re.sub(r'#\d+', '', address)
     address = re.sub(r'\s+', ' ', address).strip()
 
-    return f"{address}, {row['District']}, {row['State']}, India"
+    return address
 
 
 # -------------------------------
@@ -49,33 +49,40 @@ def save_cache(cache):
 
 
 # -------------------------------
-# 🧠 VALIDATION (STATE + CITY)
+# 🧠 VALIDATION
 # -------------------------------
-def is_valid_result(result, input_state, input_city):
+def is_valid_result(result, state, city, pincode):
     display = result.get("display_name", "").lower()
 
-    state_ok = input_state.lower() in display
+    state_ok = state.lower() in display
 
-    # Loose city matching (handles spelling variations)
     city_ok = (
-        input_city.lower() in display
-        or input_city.lower().split()[0] in display
+        city.lower() in display
+        or city.lower().split()[0] in display
     )
 
-    return state_ok and city_ok
+    pin_ok = str(pincode) in display if str(pincode).isdigit() else True
+
+    return state_ok and (city_ok or pin_ok)
 
 
 # -------------------------------
-# 🧭 GEOCODE
+# 🧭 GEOCODE WITH PINCODE PRIORITY
 # -------------------------------
 def geocode(row, api_key, cache):
-    input_state = str(row['State']).strip()
-    input_city = str(row['City']).strip()
+
+    state = str(row['State']).strip()
+    city = str(row['City']).strip()
+    district = str(row['District']).strip()
+    pincode = str(row['Pincode']).strip()
+    base_addr = clean_address(row)
 
     address_levels = [
-        clean_address(row),
-        f"{row['City']}, {row['District']}, {row['State']}, India",
-        f"{row['District']}, {row['State']}, India"
+        f"{pincode}, {base_addr}, {state}, India",
+        f"{pincode}, {district}, {state}, India",
+        f"{base_addr}, {district}, {state}, India",
+        f"{city}, {district}, {state}, India",
+        f"{district}, {state}, India"
     ]
 
     for level, address in enumerate(address_levels):
@@ -103,7 +110,7 @@ def geocode(row, api_key, cache):
             data = r.json()
 
             for result in data:
-                if is_valid_result(result, input_state, input_city):
+                if is_valid_result(result, state, city, pincode):
                     lat = float(result["lat"])
                     lng = float(result["lon"])
 
@@ -117,11 +124,11 @@ def geocode(row, api_key, cache):
 
 
 # -------------------------------
-# 🔵 SMOOTH CIRCLE
+# 🔵 CIRCLE
 # -------------------------------
 def create_circle(lat, lng, r):
     coords = []
-    for i in range(72):  # smoother circle
+    for i in range(72):
         angle = math.radians(i * 5)
         dx = r * math.cos(angle)
         dy = r * math.sin(angle)
@@ -135,13 +142,13 @@ def create_circle(lat, lng, r):
 
 
 # -------------------------------
-# 🎨 VISUAL STYLES
+# 🎨 STYLES
 # -------------------------------
 def add_styles(doc):
     styles = [
-        ("circle1", "4dff0000"),  # light red
-        ("circle2", "4d00ff00"),  # light green
-        ("circle3", "4d0000ff")   # light blue
+        ("circle1", "4dff0000"),
+        ("circle2", "4d00ff00"),
+        ("circle3", "4d0000ff")
     ]
 
     for sid, color in styles:
@@ -181,7 +188,7 @@ def generate(df, api_key, batch_no, batch_size=50):
         lng, lat, status, addr = geocode(row, api_key, cache)
 
         debug.append({
-            "Address": addr,
+            "Used Address": addr,
             "Lat": lat,
             "Lng": lng,
             "Status": status
