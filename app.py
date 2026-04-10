@@ -12,7 +12,6 @@ from sklearn.cluster import KMeans
 import numpy as np
 
 st.set_page_config(page_title="Execution Planning System", layout="wide")
-
 st.title("📍 OOH Execution Planning System")
 
 api_key = st.text_input("Enter LocationIQ API Key", type="password")
@@ -48,16 +47,30 @@ def save_cache(cache):
         json.dump(cache, f)
 
 # -------------------------------
-# VALIDATION
+# VALIDATION (BALANCED)
 # -------------------------------
 def is_valid_result(result, state, city, pincode):
+
     display = result.get("display_name", "").lower()
 
     state_ok = state.lower() in display
-    city_ok = city.lower() in display or city.lower().split()[0] in display
-    pin_ok = str(pincode) in display if str(pincode).isdigit() else True
 
-    return state_ok and (city_ok or pin_ok)
+    city_ok = (
+        city.lower() in display
+        or city.lower().split()[0] in display
+    )
+
+    pin_ok = str(pincode) in display if str(pincode).isdigit() else False
+
+    # Primary condition
+    if state_ok and (pin_ok or city_ok):
+        return True
+
+    # Fallback: strong place types
+    if state_ok and result.get("type") in ["city", "town", "village"]:
+        return True
+
+    return False
 
 # -------------------------------
 # GEOCODE
@@ -91,7 +104,8 @@ def geocode(row, api_key, cache):
             "q": address,
             "format": "json",
             "limit": 5,
-            "countrycodes": "in"
+            "countrycodes": "in",
+            "addressdetails": 1
         }
 
         try:
@@ -195,7 +209,7 @@ def generate(df, api_key, batch_no, num_teams, batch_size=50):
         })
 
         progress.progress((i - start + 1) / len(df_batch))
-        time.sleep(0.2)
+        time.sleep(0.3)
 
     save_cache(cache)
 
@@ -223,7 +237,6 @@ def generate(df, api_key, batch_no, num_teams, batch_size=50):
         pt = SubElement(pm, 'Point')
         SubElement(pt, 'coordinates').text = f"{lng},{lat}"
 
-        # circles
         for r in [1, 2, 3]:
             poly = SubElement(doc, 'Placemark')
             SubElement(poly, 'name').text = f"{city} | {r}km"
